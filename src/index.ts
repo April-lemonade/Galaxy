@@ -4,135 +4,121 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
-import { ICommandPalette, MainAreaWidget, WidgetTracker } from '@jupyterlab/apputils';
-import { Widget } from '@lumino/widgets';
-import { SankeyWidget } from './components/SankeyWidget'
+import {
+  ICommandPalette,
+  MainAreaWidget,
+  WidgetTracker,
+  ToolbarButton
+} from '@jupyterlab/apputils';
 
-interface APODResponse {
-  copyright: string;
-  date: string;
-  explanation: string;
-  media_type: 'video' | 'image';
-  title: string;
-  url: string;
-};
-
-class APODWidget extends Widget {
-  /**
-  * Construct a new APOD widget.
-  */
-  constructor() {
-    super();
-
-    this.addClass('my-apodWidget');
-
-    // Add an image element to the panel
-    this.img = document.createElement('img');
-    this.node.appendChild(this.img);
-
-    // Add a summary element to the panel
-    this.summary = document.createElement('p');
-    this.node.appendChild(this.summary);
-  }
-
-  /**
-  * The image element associated with the widget.
-  */
-  readonly img: HTMLImageElement;
-
-  /**
-  * The summary text element associated with the widget.
-  */
-  readonly summary: HTMLParagraphElement;
-
-  /**
-  * Handle update requests for the widget.
-  */
-  async updateAPODImage(): Promise<void> {
-
-    const response = await fetch(`https://api.nasa.gov/planetary/apod?api_key=DEMO_KEY&date=${this.randomDate()}`);
-
-    if (!response.ok) {
-      const data = await response.json();
-      if (data.error) {
-        this.summary.innerText = data.error.message;
-      } else {
-        this.summary.innerText = response.statusText;
-      }
-      return;
-    }
-
-    const data = await response.json() as APODResponse;
-
-    if (data.media_type === 'image') {
-      // Populate the image
-      this.img.src = data.url;
-      this.img.title = data.title;
-      this.summary.innerText = data.title;
-      if (data.copyright) {
-        this.summary.innerText += ` (Copyright ${data.copyright})`;
-      }
-    } else {
-      this.summary.innerText = 'Random APOD fetched was not an image.';
-    }
-  }
-
-  /**
-  * Get a random date string in YYYY-MM-DD format.
-  */
-  randomDate(): string {
-    const start = new Date(2010, 1, 1);
-    const end = new Date();
-    const randomDate = new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime()));
-    return randomDate.toISOString().slice(0, 10);
-  }
+import { IFileBrowserFactory, FileBrowser } from '@jupyterlab/filebrowser';
+import { SankeyWidget } from './components/SankeyWidget';
+import { PageConfig } from '@jupyterlab/coreutils';
+import { runIcon } from '@jupyterlab/ui-components';
 
 
+function getXsrfTokenFromCookie(): string | null {
+  const match = document.cookie.match(/\b_xsrf=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
-function activate(app: JupyterFrontEnd, palette: ICommandPalette, restorer: ILayoutRestorer | null) {
-  console.log('JupyterLab extension jupyterlab_apod is activated!');
+function activate(
+  app: JupyterFrontEnd,
+  palette: ICommandPalette,
+  browserFactory: IFileBrowserFactory,
+  restorer: ILayoutRestorer | null
+) {
+  console.log('✅ JupyterLab extension galaxy is activated!');
 
-  // Declare a widget variable
-  // let widget: MainAreaWidget<APODWidget>;
+  const command = 'galaxy:analyze';
 
-  // Add an application command
-  const command = 'sankey:open'
   app.commands.addCommand(command, {
-    label: 'Open Sankey View',
-    execute: () => {
-      const content = new SankeyWidget();
-      const widget = new MainAreaWidget({ content });
-      widget.title.label = 'Sankey Diagram';
-      widget.title.closable = true;
-      app.shell.add(widget, 'main');
+    label: 'Analyze Selected Notebooks',
+    execute: async () => {
+      const fileBrowserWidget = browserFactory.tracker.currentWidget;
+      if (!fileBrowserWidget) {
+        console.warn('⚠️ No active file browser');
+        return;
+      }
+
+      const selectedPaths = Array.from(fileBrowserWidget.selectedItems())
+        .filter(item => item.type === 'notebook')
+        .map(item => item.path);
+
+      console.log("📁 Selected paths to send:", selectedPaths);
+
+      if (selectedPaths.length === 0) {
+        console.warn('⚠️ No notebooks selected');
+        return;
+      }
+
+      try {
+        const xsrfToken = getXsrfTokenFromCookie();
+        const url = PageConfig.getBaseUrl() + 'galaxy/analyze';
+        console.log("XSRF TOKEN", xsrfToken);
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-XSRFToken': xsrfToken || ''
+          },
+          credentials: 'same-origin',
+          body: JSON.stringify({ paths: selectedPaths })
+        });
+
+        if (!res.ok) throw new Error(`❌ ${res.statusText}`);
+        const result = await res.json();
+
+        const content = new SankeyWidget(result);
+        const widget = new MainAreaWidget({ content });
+        widget.title.label = 'Sankey Diagram';
+        widget.title.closable = true;
+        app.shell.add(widget, 'main');
+        tracker.add(widget);
+      } catch (err) {
+        console.error('❌ Failed to analyze notebooks:', err);
+      }
     }
   });
-  palette.addItem({ command: 'sankey:open', category: 'Galaxy Tools' })
 
-  // Track and restore the widget state
-  let tracker = new WidgetTracker<MainAreaWidget<APODWidget>>({
-    namespace: 'apod'
+  palette.addItem({ command: command, category: 'Galaxy Tools' });
+
+
+  // Tracker + restore
+  const tracker = new WidgetTracker<MainAreaWidget<SankeyWidget>>({
+    namespace: 'galaxy'
   });
+
   if (restorer) {
     restorer.restore(tracker, {
       command,
-      name: () => 'apod'
+      name: () => 'galaxy'
     });
   }
+
+  app.restored.then(() => {
+    // 添加 "Analyze" 按钮到 FileBrowser 工具栏
+    const fbWidget = browserFactory.tracker.currentWidget;
+    if (fbWidget && fbWidget instanceof FileBrowser) {
+      const analyzeButton = new ToolbarButton({
+        icon: runIcon,
+        tooltip: 'Analyze selected notebooks',
+        onClick: () => {
+          app.commands.execute(command);
+        }
+      });
+      fbWidget.toolbar.insertItem(5, 'analyzeNotebooks', analyzeButton);
+    }
+  })
 }
 
-
-/**
- * Initialization data for the galaxy extension.
- */
 const plugin: JupyterFrontEndPlugin<void> = {
   id: 'galaxy:plugin',
-  description: 'A JupyterLab extension.',
+  description: 'Analyze selected notebooks and show Sankey diagram.',
   autoStart: true,
-  requires: [ICommandPalette],
+  requires: [ICommandPalette, IFileBrowserFactory],
   optional: [ILayoutRestorer],
-  activate: activate
+  activate
 };
 
 export default plugin;
