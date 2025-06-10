@@ -13,9 +13,13 @@ import {
 
 import { IFileBrowserFactory, FileBrowser } from '@jupyterlab/filebrowser';
 import { SankeyWidget } from './components/SankeyWidget';
+import type { SankeyClickPayload } from './components/SankeyWidget';
+import { GalaxySidebar } from './components/GalaxySidebar';
+
 import { PageConfig } from '@jupyterlab/coreutils';
 import { runIcon } from '@jupyterlab/ui-components';
 
+let sidebar: GalaxySidebar | null = null;
 
 function getXsrfTokenFromCookie(): string | null {
   const match = document.cookie.match(/\b_xsrf=([^;]*)/);
@@ -31,6 +35,22 @@ function activate(
   console.log('✅ JupyterLab extension galaxy is activated!');
 
   const command = 'galaxy:analyze';
+
+  function handleCellClick(payload: SankeyClickPayload) {
+    console.log("📘 Notebook Cells:", payload.notebookCells);
+    console.log("📗 Stage Cells:", payload.stageCells);
+
+    if (sidebar) {
+      sidebar.updateContent(payload);
+    } else {
+      sidebar = new GalaxySidebar(payload);
+      sidebar.id = "galaxy-sidebar"
+      sidebar.title.label = "Inspection"
+      sidebar.title.closable = true
+      app.shell.add(sidebar, 'right')
+    }
+    app.shell.activateById('galaxy-sidebar')
+  }
 
   app.commands.addCommand(command, {
     label: 'Analyze Selected Notebooks',
@@ -69,10 +89,11 @@ function activate(
         if (!res.ok) throw new Error(`❌ ${res.statusText}`);
         const result = await res.json();
 
-        const content = new SankeyWidget(result);
+        const content = new SankeyWidget(result, (payload) => handleCellClick(payload));
         const widget = new MainAreaWidget({ content });
         widget.title.label = 'Sankey Diagram';
         widget.title.closable = true;
+
         app.shell.add(widget, 'main');
         tracker.add(widget);
       } catch (err) {

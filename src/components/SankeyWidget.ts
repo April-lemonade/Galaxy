@@ -1,17 +1,34 @@
 import { Widget } from '@lumino/widgets';
+import { colorMap, initColorMap } from './colorMap';
 import * as d3 from 'd3';
 import type { D3ZoomEvent } from 'd3';
 
 type Cell = { row: number; col: number; stage: string | null };
 
+export interface SankeyCell {
+  row: number;
+  col: number;
+  stage: string | null;
+  content: string;
+  cellId: string | null;
+}
+
+export interface SankeyClickPayload {
+  notebookCells: SankeyCell[];
+  stageCells: SankeyCell[];
+}
+
 export class SankeyWidget extends Widget {
   private result: any;
+  private onCellClick: (payload: SankeyClickPayload) => void;
 
-  constructor(result: any) {
+
+  constructor(result: any, onCellClick: (payload: SankeyClickPayload) => void) {
     super();
     this.addClass('sankey-widget');
     this.node.innerHTML = '<div id="sankey-container"></div>';
     this.result = result;
+    this.onCellClick = onCellClick;
     this.render();
   }
 
@@ -22,9 +39,8 @@ export class SankeyWidget extends Widget {
     const raw = this.result;
 
     const matrix: Cell[] = [];
+
     const stages = new Set<string>();
-    const colorMap = new Map<string, string>();
-    const palette = d3.schemeSet2;
 
     raw.notebooks.forEach((nb: any, colIndex: number) => {
       nb.cells.forEach((cell: any, rowIndex: number) => {
@@ -33,9 +49,7 @@ export class SankeyWidget extends Widget {
       });
     });
 
-    Array.from(stages).forEach((s, i) => {
-      colorMap.set(s, palette[i % palette.length]);
-    });
+    initColorMap(stages); // 💡 自动更新 stageColorMap
 
     let notebookOrder = Array.from(new Set(matrix.map(d => d.col)));
 
@@ -46,11 +60,23 @@ export class SankeyWidget extends Widget {
       const rowCount = d3.max(matrix, (d) => d.row)! + 1;
       const cellHeight = 6;
       const cellWidth = 5;
+
+      const containerWidth = this.node.clientWidth;
       const padding = 40;
-      const cellSpacing = 60;
-      const height = rowCount * cellHeight + 60;
+      const usableWidth = containerWidth - 2 * padding;
+      const cellSpacing = notebookCount > 1 ? usableWidth / (notebookCount - 1) : 0;
+
+      const legendItems = Array.from(colorMap.entries());
+      // const legendItemHeight = 16;
+      const legendItemWidth = 150;
+      const legendItemSpacingY = 20;
+      const maxItemsPerRow = Math.floor((containerWidth - 2 * padding) / legendItemWidth);
+      const legendHeight = Math.ceil(legendItems.length / maxItemsPerRow) * legendItemSpacingY;
+
+      const height = rowCount * cellHeight + 60 + legendHeight;
+
       const x = (col: number) => padding + notebookOrder.indexOf(col) * cellSpacing;
-      const width = x(notebookOrder[notebookCount - 1]) + cellWidth + padding;
+      const width = containerWidth; // 直接使用 widget 的宽度
 
       const svg = container.append('svg')
         .attr('width', width)
@@ -100,7 +126,35 @@ export class SankeyWidget extends Widget {
         .attr('y', (d) => d.row * cellHeight + 40)
         .attr('width', cellWidth)
         .attr('height', cellHeight)
-        .attr('fill', (d) => (d.stage ? colorMap.get(d.stage) || '#ccc' : '#ccc'));
+        .attr('fill', (d) => (d.stage ? colorMap.get(d.stage) || '#ccc' : '#ccc'))
+        .on('click', (_, d: Cell) => {
+          if (this.onCellClick) {
+            const notebookCells = matrix
+              .filter(c => c.col === d.col)
+              .map(c => ({
+                row: c.row,
+                col: c.col,
+                stage: c.stage,
+                content: raw.notebooks[c.col].cells[c.row]?.code || '',
+                cellId: raw.notebooks[c.col].cells[c.row]?.cell_id
+              }));
+
+            const stageCells = matrix
+              .filter(c => c.stage === d.stage)
+              .map(c => ({
+                row: c.row,
+                col: c.col,
+                stage: c.stage,
+                cellId: raw.notebooks[c.col].cells[c.row]?.cell_id,
+                content: raw.notebooks[c.col].cells[c.row]?.code || ''
+              }));
+
+            this.onCellClick({
+              notebookCells,
+              stageCells
+            });
+          }
+        });
 
       // Links
       const links: any[] = [];
@@ -193,23 +247,33 @@ export class SankeyWidget extends Widget {
 
       // Legend
       const legend = svg.append('g')
-        .attr('transform', `translate(${padding}, ${height - 20})`);
-      const legendItems = Array.from(colorMap.entries());
+        .attr('transform', `translate(${padding}, ${rowCount * cellHeight + 60})`);
+
       legend.selectAll('rect')
         .data(legendItems)
         .join('rect')
-        .attr('x', (_, i) => i * 150)
+        .attr('x', (_, i) => (i % maxItemsPerRow) * legendItemWidth)
+        .attr('y', (_, i) => Math.floor(i / maxItemsPerRow) * legendItemSpacingY)
         .attr('width', 12)
         .attr('height', 12)
         .attr('fill', ([, color]) => color);
+
       legend.selectAll('text')
         .data(legendItems)
         .join('text')
-        .attr('x', (_, i) => i * 150 + 16)
-        .attr('y', 10)
+        .attr('x', (_, i) => (i % maxItemsPerRow) * legendItemWidth + 16)
+        .attr('y', (_, i) => Math.floor(i / maxItemsPerRow) * legendItemSpacingY + 10)
         .text(([stage]) => stage)
         .attr('alignment-baseline', 'middle');
     };
+
+    const resizeObserver = new ResizeObserver(() => {
+      document.querySelectorAll('.tooltip-div').forEach((tooltip) => {
+        (tooltip as HTMLElement).style.display = 'none';
+      });
+      draw();
+    });
+    resizeObserver.observe(this.node);
 
     draw();
   }
